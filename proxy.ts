@@ -1,3 +1,4 @@
+import { getSessionCookie } from "better-auth/cookies";
 import { NextResponse, type NextRequest } from "next/server";
 
 const PROTECTED_PREFIXES = [
@@ -10,18 +11,20 @@ const PROTECTED_PREFIXES = [
   "/settings",
 ];
 
-const AUTH_PATHS = ["/login", "/signup", "/forgot-password", "/reset-password"];
-
-const SESSION_COOKIE = "better-auth.session_token";
-
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const hasSession = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
+
+  // getSessionCookie reads the session cookie including the "__Secure-" prefix
+  // Better Auth applies in production. A hardcoded "better-auth.session_token"
+  // check only ever matched the dev cookie, so the proxy always believed the
+  // user was signed out on Vercel and bounced authenticated routes back to
+  // /login while the login page (which validates the real session) sent them
+  // forward to /dashboard — an infinite redirect loop.
+  const hasSession = Boolean(getSessionCookie(request));
 
   const isProtected = PROTECTED_PREFIXES.some(
     (p) => pathname === p || pathname.startsWith(p + "/"),
   );
-  const isAuthPage = AUTH_PATHS.includes(pathname);
 
   if (isProtected && !hasSession) {
     const loginUrl = new URL("/login", request.url);
@@ -29,10 +32,11 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  // Signed-in users hitting auth pages go straight to the dashboard.
-  if (isAuthPage && hasSession) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
-  }
+  // Auth pages are NOT redirected here on purpose: login/signup/forgot/reset
+  // already send signed-in users to /dashboard using a validated session
+  // (lib/session.ts). Redirecting on cookie presence alone disagrees with that
+  // check whenever the cookie is stale — e.g. after a secret rotation or an
+  // expired session — which ping-pongs /login and /dashboard forever.
 
   return NextResponse.next();
 }
