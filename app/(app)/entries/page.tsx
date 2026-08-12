@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { and, desc, eq, exists, ilike, inArray, or, sql } from "drizzle-orm";
-import { ChevronLeft, ChevronRight, PackageSearch } from "lucide-react";
+import { Calendar, ChevronLeft, ChevronRight, Package, PackageSearch } from "lucide-react";
 import { format } from "date-fns";
 
 import { EntrySearchBar, type EntryFilters } from "@/components/entry-search-bar";
@@ -89,20 +89,28 @@ export default async function EntriesPage({
       .offset((page - 1) * PAGE_SIZE),
   ]);
 
-  // Thumbnails + item counts for the page's entries.
+  // Items for the page's entries — thumbnails, counts, and the preview list.
   const ids = rows.map((r) => r.id);
   const itemRows = ids.length
     ? await db
-        .select({ entryId: schema.item.entryId, imageUrl: schema.item.imageUrl })
+        .select({
+          id: schema.item.id,
+          entryId: schema.item.entryId,
+          name: schema.item.name,
+          description: schema.item.description,
+          imageUrl: schema.item.imageUrl,
+        })
         .from(schema.item)
         .where(inArray(schema.item.entryId, ids))
     : [];
-  const byEntry = new Map<string, { count: number; thumb: string | null }>();
-  for (const r of rows) byEntry.set(r.id, { count: 0, thumb: null });
+  type ItemPreview = { id: string; name: string; description: string | null };
+  const byEntry = new Map<string, { count: number; thumb: string | null; items: ItemPreview[] }>();
+  for (const r of rows) byEntry.set(r.id, { count: 0, thumb: null, items: [] });
   for (const it of itemRows) {
     const e = byEntry.get(it.entryId);
     if (e) {
       e.count += 1;
+      e.items.push({ id: it.id, name: it.name, description: it.description });
       if (!e.thumb && it.imageUrl) e.thumb = it.imageUrl;
     }
   }
@@ -139,44 +147,78 @@ export default async function EntriesPage({
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <CardContent className="p-0">
-            <ul className="divide-y">
-              {rows.map((e) => {
-                const meta = byEntry.get(e.id);
-                return (
-                  <li key={e.id}>
-                    <Link href={`/entries/${e.id}`} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40">
-                      <div className="grid size-11 shrink-0 place-items-center overflow-hidden rounded-lg border bg-muted">
-                        {meta?.thumb ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={meta.thumb} alt="" className="size-full object-cover" />
-                        ) : (
-                          <PackageSearch className="size-5 text-muted-foreground" />
-                        )}
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {rows.map((e) => {
+            const meta = byEntry.get(e.id);
+            const preview = meta?.items.slice(0, 2) ?? [];
+            const extra = (meta?.count ?? 0) - preview.length;
+            return (
+              <Link
+                key={e.id}
+                href={`/entries/${e.id}`}
+                className="group flex flex-col rounded-xl border bg-card p-4 shadow-sm transition-colors hover:border-primary/40 hover:shadow-md"
+              >
+                {/* Header — thumbnail, RS number, status */}
+                <div className="flex items-start gap-3">
+                  <div className="grid size-11 shrink-0 place-items-center overflow-hidden rounded-lg border bg-muted">
+                    {meta?.thumb ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={meta.thumb} alt="" className="size-full object-cover" />
+                    ) : (
+                      <PackageSearch className="size-5 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-sm font-semibold group-hover:text-primary">
+                        {e.rsNumber}
+                      </span>
+                      {e.isValuable ? (
+                        <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
+                          Valuable
+                        </Badge>
+                      ) : null}
+                    </div>
+                    <p className="truncate text-xs text-muted-foreground">{e.foundLocation || "—"}</p>
+                  </div>
+                  <StatusBadge status={e.status} />
+                </div>
+
+                {/* Item preview — names + short descriptions */}
+                <ul className="mt-3 flex-1 space-y-2">
+                  {preview.map((it) => (
+                    <li key={it.id} className="flex items-start gap-2">
+                      <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary/40" />
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{it.name}</p>
+                        {it.description ? (
+                          <p className="truncate text-xs text-muted-foreground">{it.description}</p>
+                        ) : null}
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-sm font-semibold">{e.rsNumber}</span>
-                          {e.isValuable ? (
-                            <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
-                              Valuable
-                            </Badge>
-                          ) : null}
-                        </div>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {meta?.count ?? 0} item{meta?.count === 1 ? "" : "s"} · {e.foundLocation || "—"}
-                        </p>
-                        <p className="text-xs text-muted-foreground">{format(e.foundAt, "dd MMM yyyy, HH:mm")}</p>
-                      </div>
-                      <StatusBadge status={e.status} />
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          </CardContent>
-        </Card>
+                    </li>
+                  ))}
+                  {extra > 0 ? (
+                    <li className="text-xs text-muted-foreground">
+                      +{extra} more item{extra === 1 ? "" : "s"}
+                    </li>
+                  ) : null}
+                </ul>
+
+                {/* Footer — found date + item count */}
+                <div className="mt-3 flex items-center gap-3 border-t pt-2.5 text-xs text-muted-foreground">
+                  <span className="inline-flex items-center gap-1">
+                    <Calendar className="size-3.5" />
+                    {format(e.foundAt, "dd MMM yyyy, HH:mm")}
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Package className="size-3.5" />
+                    {meta?.count ?? 0} item{meta?.count === 1 ? "" : "s"}
+                  </span>
+                </div>
+              </Link>
+            );
+          })}
+        </div>
       )}
 
       {totalPages > 1 ? (
