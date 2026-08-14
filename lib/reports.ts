@@ -192,7 +192,7 @@ export function renderReportHtml(data: ReportData): string {
   <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden">
     <div style="background:#7c5cff;color:#fff;padding:20px 24px">
       <div style="font-size:18px;font-weight:600">Lost &amp; Found — daily report</div>
-      <div style="font-size:13px;opacity:.85">Fairmont The Palm · ${format(data.generatedAt, "EEEE d MMM yyyy, HH:mm")}</div>
+      <div style="font-size:13px;opacity:.85">ReturnHound · ${format(data.generatedAt, "EEEE d MMM yyyy, HH:mm")}</div>
     </div>
     <div style="padding:24px">
       <table role="presentation" style="width:100%;border-collapse:collapse;margin-bottom:24px">
