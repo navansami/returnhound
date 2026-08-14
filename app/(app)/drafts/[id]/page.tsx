@@ -1,6 +1,8 @@
 import { notFound, redirect } from "next/navigation";
 import { eq } from "drizzle-orm";
+import { Sparkles } from "lucide-react";
 
+import { ParseFormButton } from "@/components/draft-parse-button";
 import { EntryForm } from "@/components/entry-form";
 import { toDatetimeLocal } from "@/lib/dates";
 import { RejectDraftButton } from "@/components/draft-actions";
@@ -9,8 +11,11 @@ import { db, schema } from "@/lib/db";
 import { canCreateEntry, type Role } from "@/lib/rbac";
 import { requireUser } from "@/lib/session";
 import { approveDraft } from "@/server/drafts";
+import { formParseSchema, parsedToInitial } from "@/lib/validators";
 
 export const dynamic = "force-dynamic";
+/** The Gemini parse is a slow external round-trip; give the action room to finish. */
+export const maxDuration = 30;
 
 export default async function DraftFillPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -21,6 +26,11 @@ export default async function DraftFillPage({ params }: { params: Promise<{ id: 
   const [draft] = await db.select().from(schema.draft).where(eq(schema.draft.id, id)).limit(1);
   if (!draft) notFound();
   if (draft.status !== "pending") redirect("/drafts");
+
+  // OCR results stored by `parseDraft` — validated here so a stale/foreign
+  // payload can never reach the form.
+  const parsedCheck = draft.parsedData ? formParseSchema.safeParse(draft.parsedData) : null;
+  const parsed = parsedCheck?.success ? parsedCheck.data : null;
 
   const now = new Date();
 
@@ -33,8 +43,18 @@ export default async function DraftFillPage({ params }: { params: Promise<{ id: 
             Fill in the fields from the photographed form. Logging the entry marks the draft as approved.
           </p>
         </div>
-        <RejectDraftButton draftId={draft.id} />
+        <div className="flex items-center gap-2">
+          <ParseFormButton draftId={draft.id} />
+          <RejectDraftButton draftId={draft.id} />
+        </div>
       </div>
+
+      {parsed && (
+        <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-sm text-primary">
+          <Sparkles className="size-4 shrink-0" />
+          Fields pre-filled from OCR — review and correct before saving.
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <Card className="h-fit overflow-hidden">
@@ -49,6 +69,9 @@ export default async function DraftFillPage({ params }: { params: Promise<{ id: 
         </Card>
 
         <EntryForm
+          // Re-mount when OCR updates `updatedAt` so react-hook-form re-reads
+          // the new default values instead of keeping its own state.
+          key={draft.updatedAt?.toISOString() ?? "blank"}
           initial={{
             formImage: draft.formImageUrl
               ? { url: draft.formImageUrl, publicId: draft.formImagePublicId ?? "" }
@@ -56,20 +79,11 @@ export default async function DraftFillPage({ params }: { params: Promise<{ id: 
             onCreated: async () => {
               await approveDraft(id);
             },
-            values: {
+            values: parsedToInitial(parsed, {
               foundAt: toDatetimeLocal(now),
               receivedAt: toDatetimeLocal(now),
-              foundLocation: "",
-              finderName: "",
-              finderDepartment: "",
-              finderEmployeeId: "",
               agentName: session.user.name,
-              storageLocation: "lost_found_store",
-              storageDetail: "",
-              isValuable: false,
-              comments: "",
-              items: [{ name: "", description: "", category: "general", imageUrl: null, imagePublicId: null }],
-            },
+            }),
           }}
         />
       </div>

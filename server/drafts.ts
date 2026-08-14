@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 
 import { writeAudit } from "@/lib/audit";
 import { db, schema } from "@/lib/db";
+import { parseLostFoundForm } from "@/lib/ocr";
 import { canCreateEntry, type Role } from "@/lib/rbac";
 import { requireUser } from "@/lib/session";
 
@@ -60,6 +61,44 @@ export async function approveDraft(draftId: string): Promise<DraftResult> {
     return { ok: true };
   } catch {
     return { ok: false, error: "Failed to approve the draft." };
+  }
+}
+
+/**
+ * Run OCR on a draft's form photo and store the parsed fields (`parsedData`)
+ * so the review page can pre-fill the entry form. The agent always reviews
+ * and corrects before saving — the parse is a draft aid, not an approval.
+ */
+export async function parseDraft(draftId: string): Promise<DraftResult> {
+  const session = await requireUser();
+  const role = session.user.role as Role;
+  if (!canCreateEntry(role)) return { ok: false, error: "You don't have permission to parse drafts." };
+
+  const [draft] = await db.select().from(schema.draft).where(eq(schema.draft.id, draftId)).limit(1);
+  if (!draft) return { ok: false, error: "Draft not found." };
+  if (draft.status !== "pending") return { ok: false, error: "Only pending drafts can be parsed." };
+  if (!draft.formImageUrl) return { ok: false, error: "This draft has no form photo to parse." };
+
+  const result = await parseLostFoundForm(draft.formImageUrl);
+  if (!result.ok) return { ok: false, error: result.error };
+
+  try {
+    await db
+      .update(schema.draft)
+      .set({ parsedData: result.data, updatedAt: new Date() })
+      .where(eq(schema.draft.id, draftId));
+    await writeAudit({
+      entityType: "draft",
+      entityId: draftId,
+      action: "parse",
+      userId: session.user.id,
+      after: { itemCount: result.data.items.length, hasParsedData: true },
+    });
+    revalidatePath("/drafts");
+    revalidatePath(`/drafts/${draftId}`);
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Failed to save the parsed form." };
   }
 }
 
