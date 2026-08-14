@@ -10,7 +10,13 @@ export async function sendEmail(opts: { to: string | string[]; subject: string; 
   const from = process.env.EMAIL_FROM ?? "Fairmont Lost & Found <lostandfound@fairmont.com>";
   const resend = new Resend(apiKey);
   const res = await resend.emails.send({ from, to: Array.isArray(opts.to) ? opts.to : [opts.to], subject: opts.subject, html: opts.html });
-  if (res.error) return { ok: false, error: res.error.message };
+  if (res.error) {
+    // Log so failures are visible in Vercel function logs — the auth flows
+    // intentionally don't fail the request when email can't be sent.
+    console.error("[email] send failed", { from, to: opts.to, error: res.error });
+    return { ok: false, error: res.error.message };
+  }
+  console.log("[email] sent", { from, to: opts.to, id: res.data?.id });
   return { ok: true };
 }
 
