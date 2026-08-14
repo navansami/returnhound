@@ -12,8 +12,11 @@ export type ParseResult = { ok: true; data: FormParse } | { ok: false; error: st
 
 /** Free tier key from https://aistudio.google.com. Mirror it in Vercel env. */
 const API_KEY = process.env.GEMINI_API_KEY;
-/** Confirm the exact current Flash model ID in Google AI Studio; it changes. */
-const MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+/**
+ * Current Flash vision model. gemini-2.5-flash is no longer available to new
+ * keys, so keep this on a 3.x model (3.x also rejects `temperature`).
+ */
+const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
 
 /**
  * Field-by-field instructions for reading the paper RS form. The critical
@@ -123,9 +126,9 @@ export async function parseLostFoundForm(imageUrl: string): Promise<ParseResult>
             },
           ],
           generationConfig: {
+            // Note: Gemini 3.x does not support temperature/top_p — omit them.
             responseMimeType: "application/json",
             responseSchema: FORM_RESPONSE_SCHEMA,
-            temperature: 0.1,
           },
         }),
       },
