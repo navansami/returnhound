@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Self-hosted OCR assets (minified Tesseract WASM cores + worker).
+    "public/tesseract/**",
   ]),
 ]);
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
@@ -10,6 +11,7 @@ import { z } from "zod";
 
 import { ID_TYPES } from "@/lib/validators";
 import { ID_TYPE_LABELS } from "@/lib/labels";
+import type { ParsedId } from "@/lib/id-mrz";
 import { collectItem, discardItem, enquireEntry, policeHandover } from "@/server/lifecycle";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,6 +28,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { SignaturePadInput } from "@/components/signature-pad";
+
+// Tesseract + its language model are ~10 MB, so the scanner is loaded on
+// demand (only when the collection dialog is opened) and client-side only.
+const IdScanner = dynamic(() => import("@/components/id-scanner").then((m) => m.IdScanner), {
+  ssr: false,
+});
 
 type ItemTarget = { id: string; name: string; status: string };
 
@@ -65,6 +73,13 @@ export function CollectionDialog({ item, canEdit }: { item: ItemTarget; canEdit:
     defaultValues: { guestName: "", idType: "emirates_id", idNumber: "", contact: "", signature: "" },
   });
   const { register, handleSubmit, setValue, formState, watch } = form;
+
+  /** Pre-fill the guest identity fields from an on-device MRZ scan. */
+  const handleScan = (parsed: ParsedId) => {
+    setValue("guestName", parsed.name, { shouldValidate: true });
+    setValue("idType", parsed.idType, { shouldValidate: true });
+    setValue("idNumber", parsed.idNumber, { shouldValidate: true });
+  };
 
   const onSubmit = async (values: CollectionForm) => {
     setSubmitting(true);
@@ -115,6 +130,9 @@ export function CollectionDialog({ item, canEdit }: { item: ItemTarget; canEdit:
                 ))}
               </SelectContent>
             </Select>
+          </div>
+          <div>
+            <IdScanner onResult={handleScan} />
           </div>
           <div>
             <Label>ID number *</Label>

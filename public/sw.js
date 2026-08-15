@@ -32,7 +32,7 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== location.origin) return;
   if (url.pathname.startsWith("/api/")) return; // network only
 
-  if (/\.(?:png|jpg|jpeg|svg|webp|ico|css|js|woff2?)$/.test(url.pathname)) {
+  if (/\.(?:png|jpg|jpeg|svg|webp|ico|css|js|woff2?|gz)$/.test(url.pathname)) {
     event.respondWith(
       caches.match(req).then(
         (hit) =>
