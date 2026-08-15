@@ -47,8 +47,17 @@ export default async function EntryDetailPage({ params }: { params: Promise<{ id
   const [collections, discards, police, enquiries] = itemIds.length
     ? await Promise.all([
         db
-          .select({ itemId: schema.collection.itemId, guestName: schema.collection.guestName, idType: schema.collection.idType, collectedAt: schema.collection.collectedAt })
+          .select({
+            itemId: schema.collection.itemId,
+            guestName: schema.collection.guestName,
+            idType: schema.collection.idType,
+            idNumber: schema.collection.idNumber,
+            contact: schema.collection.contact,
+            collectedAt: schema.collection.collectedAt,
+            collectorName: schema.user.name,
+          })
           .from(schema.collection)
+          .leftJoin(schema.user, eq(schema.collection.collectedById, schema.user.id))
           .where(inArray(schema.collection.itemId, itemIds)),
         db
           .select({ itemId: schema.discard.itemId, reason: schema.discard.reason, witnessName: schema.discard.witnessName, discardedAt: schema.discard.discardedAt })
@@ -176,7 +185,9 @@ export default async function EntryDetailPage({ params }: { params: Promise<{ id
                       {collection ? (
                         <p>
                           Collected by <span className="font-medium text-foreground">{collection.guestName}</span> (
-                          {ID_TYPE_LABELS[collection.idType]}) · {format(collection.collectedAt, "dd MMM, HH:mm")}
+                          {ID_TYPE_LABELS[collection.idType]} · {collection.idNumber}) ·{" "}
+                          {format(collection.collectedAt, "dd MMM, HH:mm")}
+                          {collection.collectorName ? <> · processed by {collection.collectorName}</> : null}
                         </p>
                       ) : null}
                       {discard ? (
