@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Camera, Loader2, RefreshCw, ScanLine } from "lucide-react";
 import { toast } from "sonner";
 
-import { parseMrzText, type ParsedId } from "@/lib/id-mrz";
+import { parseMrzText, parseMrzTextRepaired, type ParsedId } from "@/lib/id-mrz";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -60,6 +60,19 @@ function normalizeMrzText(text: string): string {
     .join("\n");
 }
 
+/** True when an OCR read looks like a Machine-Readable Zone: at least two
+ * fixed-width, [A-Z0-9<]-only lines. Used to distinguish "no MRZ in frame"
+ * from "MRZ present but unreadable" so the error message can guide the user. */
+function mrzShapedRead(text: string): boolean {
+  let lines = 0;
+  for (const line of text.split(/\r?\n/)) {
+    const length = line.replace(/[^A-Z0-9<]/g, "").length;
+    if (length >= 27 && length <= 47) lines++;
+    if (lines >= 2) return true;
+  }
+  return false;
+}
+
 /**
  * Downscale to a workable size and convert to grayscale. Tesseract's default
  * model reads the MRZ reliably only when the characters land in a narrow size
@@ -101,60 +114,150 @@ function prepareFrame(source: ImageBitmap | HTMLImageElement): {
 }
 
 /**
- * Locate the Machine-Readable Zone by horizontal projection. MRZ lines are
- * dense horizontal strips of text; on a passport or Emirates ID back the block
- * sits at the bottom of the card, above nothing but its own lines. We walk the
- * dense row-runs from the bottom and keep runs that look like text lines
- * (≤ ~90 rows) separated by small gaps, stopping when we hit a big gap or a
- * block far taller than a text line (the 2D barcode on an EID back). Returns
- * the row range [y0, y1] (plus margins) and the number of lines, or null.
+ * Locate the Machine-Readable Zone anywhere in the frame. The old projection
+ * approach walked dense row-runs from the bottom and assumed the MRZ sits
+ * alone at the bottom of a clean photo — it broke on real shots where the card
+ * doesn't fill the frame (a dark desk or app UI below), or where the card's 2D
+ * barcode and the MRZ lines merge into one dense run. Instead we classify rows
+ * by their dark-run structure (text rows have many short glyph runs; barcode
+ * blocks and solid fills have few long ones), group text rows into lines, and
+ * score every 2–3-line window across the whole frame for MRZ-like shape:
+ * similar line heights, high ink density, and (weakly) a lower position in the
+ * frame. Returns the row range [y0, y1] and the number of lines, or null.
  */
 function findMrzBand(
   gray: Uint8ClampedArray,
   width: number,
   height: number,
 ): { y0: number; y1: number; lines: number } | null {
-  const dense = new Array<boolean>(height).fill(false);
-  const rowThresh = Math.max(10, Math.round(width * 0.04));
+  const darkThreshold = 140;
+  const minSegments = 4;
+  const minDark = Math.max(12, Math.round(width * 0.015));
+  const minLineHeight = 6;
+  const maxLineHeight = 100;
+  const maxLineGap = 45;
+
+  // 1. Classify each row as text-like: enough dark pixels, split into several
+  //    short horizontal runs (glyphs) rather than one solid bar (barcode).
+  const textRow = new Array<boolean>(height).fill(false);
   for (let y = 0; y < height; y++) {
+    let segments = 0;
     let dark = 0;
+    let inRun = false;
     const row = y * width;
     for (let x = 0; x < width; x++) {
-      if (gray[row + x] < 140) dark++;
+      if (gray[row + x] < darkThreshold) {
+        dark++;
+        if (!inRun) {
+          inRun = true;
+          segments++;
+        }
+      } else {
+        inRun = false;
+      }
     }
-    dense[y] = dark >= rowThresh;
+    textRow[y] = segments >= minSegments && dark >= minDark;
   }
 
-  const runs: Array<[number, number]> = [];
+  // 2. Group consecutive text rows into lines, tolerating 1–2 stray noise rows
+  //    so a slightly glare-washed glyph row doesn't split a line in two.
+  const lines: Array<[number, number]> = [];
   let y = 0;
   while (y < height) {
-    if (dense[y]) {
-      const y0 = y;
-      while (y < height && dense[y]) y++;
-      runs.push([y0, y - 1]);
-    } else {
+    if (!textRow[y]) {
       y++;
+      continue;
+    }
+    let last = y;
+    let cursor = y + 1;
+    while (cursor < height) {
+      if (textRow[cursor]) {
+        last = cursor;
+        cursor++;
+        continue;
+      }
+      let holes = 0;
+      let look = cursor;
+      while (look < height && !textRow[look] && holes <= 2) {
+        holes++;
+        look++;
+      }
+      if (holes <= 2 && look < height) {
+        last = look;
+        cursor = look + 1;
+      } else {
+        break;
+      }
+    }
+    if (last - y + 1 >= minLineHeight && last - y + 1 <= maxLineHeight) {
+      lines.push([y, last]);
+    }
+    y = cursor;
+  }
+
+  // 3. Score every 2–3-line window that could be the MRZ block.
+  const inkOf = (a: number, b: number): number => {
+    let ink = 0;
+    for (let yy = a; yy <= b; yy++) {
+      const row = yy * width;
+      for (let x = 0; x < width; x++) {
+        if (gray[row + x] < darkThreshold) ink++;
+      }
+    }
+    return ink;
+  };
+
+  let best: { y0: number; y1: number; lines: number } | null = null;
+  let bestScore = -Infinity;
+  for (let i = 0; i < lines.length; i++) {
+    for (let n = 2; n <= 3 && i + n - 1 < lines.length; n++) {
+      const band = lines.slice(i, i + n);
+      let gaps = 0;
+      let tooWide = false;
+      for (let k = 1; k < band.length; k++) {
+        const gap = band[k][0] - band[k - 1][1] - 1;
+        if (gap > maxLineGap) {
+          tooWide = true;
+          break;
+        }
+        gaps += gap;
+      }
+      if (tooWide) break; // a big gap ends the run of plausible lines
+      const heights = band.map(([a, b]) => b - a + 1);
+      const mean = heights.reduce((s, h) => s + h, 0) / heights.length;
+      const variance =
+        heights.reduce((s, h) => s + (h - mean) ** 2, 0) / heights.length;
+      const ink = band.reduce((s, [a, b]) => s + inkOf(a, b), 0);
+      // MRZ lines are ~30% ink-dense; cap the density term so solid blocks
+      // can't dominate. Prefer 3 lines, similar heights, ink-rich lines, and
+      // (weakly) blocks lower in the frame — the MRZ sits at the card's bottom.
+      const density = Math.min(0.6, ink / (width * mean));
+      const score =
+        n * 12 - variance * 1.5 + density * 60 + (band[0][0] / height) * 30 - gaps * 0.5;
+      if (score > bestScore) {
+        bestScore = score;
+        best = {
+          y0: Math.max(0, band[0][0] - 4),
+          y1: Math.min(height - 1, band[band.length - 1][1] + 4),
+          lines: n,
+        };
+      }
     }
   }
-
-  const cluster: Array<[number, number]> = [];
-  for (let i = runs.length - 1; i >= 0; i--) {
-    const [a, b] = runs[i];
-    if (b - a + 1 > 90) break; // the 2D barcode / QR block — stop here
-    if (cluster.length && cluster[0][0] - b - 1 > 45) break; // big gap — stop
-    cluster.unshift([a, b]);
-  }
-  if (cluster.length < 2) return null;
-  return {
-    y0: Math.max(0, cluster[0][0] - 4),
-    y1: Math.min(height - 1, cluster[cluster.length - 1][1] + 4),
-    lines: cluster.length,
-  };
+  return best;
 }
 
-/** Crop the MRZ band and resize it so each line lands near `lineHeight` px. */
+/**
+ * Crop the MRZ band out of the ORIGINAL full-resolution photo and resize it so
+ * each line lands near `lineHeight` px. The band coordinates come from the
+ * capped analysis frame, so they're scaled back up to the source. Reading the
+ * band at source resolution (instead of the capped frame) keeps the glyphs as
+ * sharp as the camera captured them, which is exactly what Tesseract's
+ * size-sensitive model needs.
+ */
 function cropAndResizeMrz(
-  src: HTMLCanvasElement,
+  source: ImageBitmap | HTMLImageElement,
+  frameH: number,
   y0: number,
   y1: number,
   lines: number,
@@ -162,14 +265,19 @@ function cropAndResizeMrz(
 ): HTMLCanvasElement {
   const ch = y1 - y0 + 1;
   const target = Math.max(20, Math.round(lines * lineHeight + 8));
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.round((src.width * target) / ch));
-  out.height = target;
-  const ctx = out.getContext("2d")!;
+  const srcH = source.height;
+  const sy = Math.min(srcH - 1, Math.round((y0 * srcH) / frameH));
+  const sh = Math.max(1, Math.min(srcH - sy, Math.round((ch * srcH) / frameH)));
+  const outW = Math.max(1, Math.round((source.width * target) / sh));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = target;
+  const ctx = canvas.getContext("2d")!;
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(src, 0, y0, src.width, ch, 0, 0, out.width, target);
-  return out;
+  ctx.drawImage(source, 0, sy, source.width, sh, 0, 0, outW, target);
+  return canvas;
 }
 
 /** Decode the captured File into something drawable. */
@@ -247,29 +355,63 @@ export function IdScanner({ onResult }: { onResult: (parsed: ParsedId) => void }
       // under slightly different conditions — so we try a small ensemble of
       // line heights, first with the strict MRZ whitelist (clean reads) and
       // then letting the language model help the name line, normalising the
-      // output afterwards. Each pass is gated by the ICAO check digits in
-      // parseMrzText, so a misread is rejected, never recorded.
+      // output afterwards. When the card sits far from the lens the band lines
+      // come out tiny, so we add two harder-upscaled passes. Every pass is
+      // gated by the ICAO check digits, so a misread is rejected, never
+      // recorded; if all passes still fail their checksums, a single-edit
+      // repair (parseMrzTextRepaired) gets one more chance before we fall back
+      // to manual entry.
+      const bandLineHeight = (band.y1 - band.y0 + 1) / band.lines;
       const variants = [
         { mode: "wl", line: 34 },
         { mode: "wl", line: 40 },
         { mode: "nowl", line: 46 },
         { mode: "nowl", line: 34 },
+        ...(bandLineHeight < 35
+          ? ([
+              { mode: "wl", line: 56 },
+              { mode: "nowl", line: 56 },
+            ] as const)
+          : []),
       ] as const;
 
       let parsed: ParsedId | null = null;
+      const reads: string[] = [];
+      let sawMrzShaped = false;
       for (const v of variants) {
         await worker.setParameters({
           tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
           tessedit_char_whitelist: v.mode === "wl" ? MRZ_CHARSET : "",
         });
-        const canvas = cropAndResizeMrz(prepared.canvas, band.y0, band.y1, band.lines, v.line);
+        const canvas = cropAndResizeMrz(
+          source,
+          prepared.height,
+          band.y0,
+          band.y1,
+          band.lines,
+          v.line,
+        );
         const { data } = await worker.recognize(canvas);
         const text = v.mode === "nowl" ? normalizeMrzText(data.text) : data.text;
+        reads.push(text);
+        sawMrzShaped ||= mrzShapedRead(text);
         parsed = parseMrzText(text);
         if (parsed) break;
       }
       if (!parsed) {
-        toast.error("Couldn't read the ID — frame the machine-readable zone (back of Emirates ID / bottom of a passport) and retry, or type the details manually");
+        for (const text of reads) {
+          parsed = parseMrzTextRepaired(text);
+          if (parsed) break;
+        }
+      }
+      if (!parsed) {
+        // If no pass even produced MRZ-looking fixed-width lines, the "band"
+        // was probably card artwork or UI — tell the user to frame the zone.
+        toast.error(
+          sawMrzShaped
+            ? "Couldn't read the ID — frame the machine-readable zone (back of Emirates ID / bottom of a passport) and retry, or type the details manually"
+            : "Couldn't find the machine-readable zone — hold the card flat so the back of the Emirates ID (or the bottom of a passport) fills the frame",
+        );
         return;
       }
       onResult(parsed);

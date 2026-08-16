@@ -1,6 +1,6 @@
 import { desc } from "drizzle-orm";
 
-import { UsersTable } from "@/components/users-table";
+import { AddUserDialog, UsersTable } from "@/components/users-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { db, schema } from "@/lib/db";
 import { canManageUsers, type Role } from "@/lib/rbac";
@@ -35,7 +35,12 @@ export default async function UsersPage() {
       </div>
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">{users.length} account{users.length === 1 ? "" : "s"}</CardTitle>
+          <div className="flex items-center justify-between gap-4">
+            <CardTitle className="text-base">
+              {users.length} account{users.length === 1 ? "" : "s"}
+            </CardTitle>
+            <AddUserDialog />
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           <UsersTable users={users.map((u) => ({ ...u, self: u.id === session.user.id }))} />
